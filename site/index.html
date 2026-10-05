@@ -102,9 +102,13 @@
       const updatedText = updated && !Number.isNaN(updated.valueOf())
         ? updated.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'unknown time';
 
-      statusEl.textContent = movies.length
-        ? `${movies.length} English-language ${movies.length === 1 ? 'movie' : 'movies'} in ${city.name} · updated ${updatedText}`
-        : `No English-language sessions published for ${city.name} · updated ${updatedText}`;
+      if (payload?.source_status === 'unavailable') {
+        statusEl.textContent = `Yelmo data is temporarily unavailable for ${city.name} · last check ${updatedText}`;
+      } else {
+        statusEl.textContent = movies.length
+          ? `${movies.length} English-language ${movies.length === 1 ? 'movie' : 'movies'} in ${city.name} · updated ${updatedText}`
+          : `No English-language sessions published for ${city.name} · updated ${updatedText}`;
+      }
 
       moviesEl.innerHTML = movies.map(movie => {
         const days = [...movie.dates.entries()].sort(([a],[b]) => String(a).localeCompare(String(b)));
