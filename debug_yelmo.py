@@ -3,8 +3,8 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 URLS = [
-    "https://www.yelmocines.es/cartelera/malaga/yelmo-cines-vialia-malaga",
-    "https://www.yelmocines.es/cartelera/malaga/yelmo-cines-plaza-mayor",
+    "https://www.yelmocines.es/cartelera/malaga/vialia-malaga",
+    "https://www.yelmocines.es/cartelera/malaga/plaza-mayor",
 ]
 
 with sync_playwright() as p:
@@ -38,12 +38,12 @@ with sync_playwright() as p:
               for(let i=0;i<10 && el;i++,el=el.parentElement) chain.push(info(el));
               return chain;
             });
-          const controls=[...document.querySelectorAll('button,a,[role="tab"],[data-date],[data-day],[datetime]')]
-            .map(info)
-            .filter(x => x.text && x.text.length < 80)
-            .filter(x => /hoy|mañana|lun|mar|mi[eé]|jue|vie|s[aá]b|dom|\b\d{1,2}[\/-]\d{1,2}\b|\b\d{1,2}\s+(ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)/i.test(x.text) || x.dataDate || x.dataDay || x.datetime)
-            .slice(0,100);
-          return {url: location.href, title: document.title, bookings, controls};
+          const selects=[...document.querySelectorAll('select')].map((s,index)=>({
+            index,
+            text:n(s.innerText||s.textContent),
+            options:[...s.options].map(o=>({value:o.value,text:n(o.textContent),selected:o.selected}))
+          }));
+          return {url: location.href, title: document.title, bookings, selects};
         }
         """)
         out.append(data)
