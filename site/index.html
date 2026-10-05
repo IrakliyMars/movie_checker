@@ -13,7 +13,7 @@
       <div>
         <p class="eyebrow">Yelmo · Málaga</p>
         <h1>Movie Checker</h1>
-        <p class="subtitle">English-language (VOSE) screenings.</p>
+        <p class="subtitle">English-language (VOSE) screenings by date.</p>
       </div>
       <button id="reload" type="button">Reload</button>
     </header>
@@ -43,6 +43,15 @@
       }
     };
 
+    const formatDate = (value) => {
+      if (!value) return 'Date';
+      const iso = /^\d{4}-\d{2}-\d{2}/.test(value) ? new Date(`${value.slice(0, 10)}T12:00:00`) : null;
+      if (iso && !Number.isNaN(iso.valueOf())) {
+        return iso.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+      }
+      return value;
+    };
+
     function render(data) {
       const cinemas = data.cinemas || [];
       const total = cinemas.reduce((sum, cinema) => sum + (cinema.movies || []).length, 0);
@@ -69,17 +78,27 @@
               ${movies.map((movie) => `
                 <article class="movie">
                   <div class="movie-copy">
-                    <a class="movie-title" href="${safeUrl(movie.url)}" target="_blank" rel="noopener noreferrer">
-                      ${escapeHtml(movie.title)}
-                    </a>
-                    <span class="badge">${escapeHtml(movie.language || 'VOSE')}</span>
-                  </div>
-                  <div class="times" aria-label="Showtimes for ${escapeHtml(movie.title)}">
-                    ${(movie.showtimes || []).map((showtime) => `
-                      <a class="time" href="${safeUrl(showtime.url)}" target="_blank" rel="noopener noreferrer" title="Open ${escapeHtml(showtime.time)} on Yelmo">
-                        ${escapeHtml(showtime.time)}
+                    <div class="movie-heading-row">
+                      <a class="movie-title" href="${safeUrl(movie.url)}" target="_blank" rel="noopener noreferrer">
+                        ${escapeHtml(movie.title)}
                       </a>
-                    `).join('')}
+                      <span class="badge">${escapeHtml(movie.language || 'VOSE')}</span>
+                    </div>
+
+                    <div class="schedule">
+                      ${(movie.dates || []).map((day) => `
+                        <div class="day-row">
+                          <div class="day-label">${escapeHtml(formatDate(day.date))}</div>
+                          <div class="times" aria-label="Showtimes for ${escapeHtml(movie.title)} on ${escapeHtml(day.date)}">
+                            ${(day.showtimes || []).map((showtime) => `
+                              <a class="time" href="${safeUrl(showtime.url)}" target="_blank" rel="noopener noreferrer" title="Open ${escapeHtml(showtime.time)} on Yelmo">
+                                ${escapeHtml(showtime.time)}
+                              </a>
+                            `).join('')}
+                          </div>
+                        </div>
+                      `).join('')}
+                    </div>
                   </div>
                 </article>
               `).join('')}
@@ -93,7 +112,6 @@
       reloadButton.disabled = true;
       statusEl.textContent = 'Loading latest published showtimes…';
       try {
-        // Cache-busting only reloads the JSON from GitHub Pages. It never calls Yelmo.
         const response = await fetch(`./data/movies.json?v=${Date.now()}`, { cache: 'no-store' });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         render(await response.json());
