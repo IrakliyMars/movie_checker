@@ -3,18 +3,21 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from urllib.parse import urljoin
+from zoneinfo import ZoneInfo
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
+MADRID = ZoneInfo("Europe/Madrid")
+
 CINEMAS = [
     {
         "name": "Vialia Málaga",
-        "url": "https://www.yelmocines.es/cartelera/malaga/yelmo-cines-vialia-malaga",
+        "url": "https://www.yelmocines.es/cartelera/malaga/vialia-malaga",
     },
     {
         "name": "Plaza Mayor",
-        "url": "https://www.yelmocines.es/cartelera/malaga/yelmo-cines-plaza-mayor",
+        "url": "https://www.yelmocines.es/cartelera/malaga/plaza-mayor",
     },
 ]
 
@@ -25,34 +28,32 @@ ENGLISH_MARKERS = (
     "INGLES (VOSE)",
     "VOSE",
 )
-
 TIME_RE = re.compile(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b")
 
-# Date selectors on Yelmo are short controls (e.g. HOY, LUN 5, MAR 6, 05/10).
-DATE_TEXT_RE = re.compile(
-    r"^(?:HOY|MAÑANA|LUN(?:ES)?|MAR(?:TES)?|MI[EÉ](?:RCOLES)?|JUE(?:VES)?|VIE(?:RNES)?|S[AÁ]B(?:ADO)?|DOM(?:INGO)?|"
-    r"(?:LUN|MAR|MI[EÉ]|JUE|VIE|S[AÁ]B|DOM)\s*\d{1,2}|"
-    r"\d{1,2}\s*(?:ENE|FEB|MAR|ABR|MAY|JUN|JUL|AGO|SEP|OCT|NOV|DIC)|"
-    r"\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)$",
-    re.IGNORECASE,
-)
-
 GENERIC_TITLES = {
-    "AYUDA",
-    "CAMBIAR DE PAÍS",
-    "CAMBIAR DE PAIS",
-    "CATÁLOGO DE PELÍCULAS",
-    "CATALOGO DE PELICULAS",
-    "CINE YELMO",
-    "INFORMACIÓN DE CINE",
-    "INFORMACION DE CINE",
-    "INGRESA TUS DATOS",
-    "POLÍTICAS",
-    "POLITICAS",
-    "POLÍTICAS Y REGLAS DE ADMISIÓN",
-    "POLITICAS Y REGLAS DE ADMISION",
+    "CINES",
+    "HORARIOS",
+    "DÍA",
+    "DIA",
+    "TIPO PROYECCIÓN",
+    "TIPO PROYECCION",
+    "FORMATO",
+    "EXPERIENCIA",
+    "IDIOMA",
     "PRÓXIMOS ESTRENOS",
     "PROXIMOS ESTRENOS",
+    "CATÁLOGO DE PELÍCULAS",
+    "CATALOGO DE PELICULAS",
+    "CAMBIAR DE PAÍS",
+    "CAMBIAR DE PAIS",
+    "CINE YELMO",
+    "POLÍTICAS",
+    "POLITICAS",
+    "AYUDA",
+    "INFORMACIÓN DE CINE",
+    "INFORMACION DE CINE",
+    "POLÍTICAS Y REGLAS DE ADMISIÓN",
+    "POLITICAS Y REGLAS DE ADMISION",
 }
 
 
@@ -66,10 +67,10 @@ def _absolute(base_url: str, href: str | None) -> str:
     return urljoin(base_url, href)
 
 
-def _looks_like_real_title(title: str) -> bool:
-    value = _clean(title)
-    upper = value.upper()
-    if not value or len(value) > 140:
+def _is_real_title(value: str) -> bool:
+    title = _clean(value)
+    upper = title.upper()
+    if not title or len(title) > 150:
         return False
     if upper in GENERIC_TITLES:
         return False
@@ -80,183 +81,189 @@ def _looks_like_real_title(title: str) -> bool:
     return True
 
 
-def _date_controls(page) -> list[dict]:
-    """Return likely schedule-date controls without clicking unrelated navigation."""
-    controls = page.evaluate(
+def _find_day_select(page) -> int | None:
+    """Return the index of Yelmo's 'Día' select among all selects."""
+    return page.evaluate(
         """
         () => {
           const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
-          const selectors = 'button,[role="tab"],[data-date],[data-day],[datetime]';
-          return [...document.querySelectorAll(selectors)].map((el, index) => ({
-            index,
-            text: norm(el.innerText || el.textContent),
-            dataDate: el.getAttribute('data-date'),
-            dataDay: el.getAttribute('data-day'),
-            datetime: el.getAttribute('datetime'),
-            ariaLabel: el.getAttribute('aria-label'),
-            title: el.getAttribute('title'),
-            disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true',
-          }));
+          const selects = [...document.querySelectorAll('select')];
+          let best = null;
+          let bestScore = -1;
+          for (let i = 0; i < selects.length; i++) {
+            const select = selects[i];
+            let score = 0;
+            const options = [...select.options].map(o => norm(o.textContent));
+            if (options.length >= 2) score += 1;
+            let parent = select.parentElement;
+            let nearby = '';
+            for (let depth = 0; depth < 4 && parent; depth++, parent = parent.parentElement) {
+              nearby += ' ' + norm(parent.innerText || parent.textContent);
+            }
+            if (/\bD[IÍ]A\b/i.test(nearby)) score += 5;
+            const dateish = options.filter(t => /HOY|MAÑANA|LUN|MAR|MI[EÉ]|JUE|VIE|S[AÁ]B|DOM|\d{1,2}[\/-]\d{1,2}|\d{4}-\d{2}-\d{2}/i.test(t)).length;
+            score += Math.min(dateish, 4);
+            if (score > bestScore) {
+              bestScore = score;
+              best = i;
+            }
+          }
+          return bestScore >= 5 ? best : null;
         }
         """
     )
 
-    result: list[dict] = []
-    seen = set()
-    for control in controls:
-        if control.get("disabled"):
-            continue
-        text = _clean(control.get("text"))
-        attrs = [
-            _clean(control.get("dataDate")),
-            _clean(control.get("dataDay")),
-            _clean(control.get("datetime")),
-            _clean(control.get("ariaLabel")),
-            _clean(control.get("title")),
-        ]
-        has_date_attr = any(re.search(r"\b20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b", a) for a in attrs if a)
-        if not ((text and len(text) <= 24 and DATE_TEXT_RE.fullmatch(text)) or has_date_attr):
-            continue
-        key = tuple([text, *attrs])
-        if key in seen:
-            continue
-        seen.add(key)
-        control["label"] = next((a for a in attrs[:3] if a), text)
-        result.append(control)
-    return result[:14]
 
-
-def _current_date_label(page) -> str:
-    value = page.evaluate(
+def _day_options(page, select_index: int) -> list[dict]:
+    return page.evaluate(
         """
-        () => {
+        (index) => {
           const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
-          const active = document.querySelector(
-            '[data-date][aria-selected="true"], [data-day][aria-selected="true"], [role="tab"][aria-selected="true"], .active[data-date], .active[data-day], button.active'
-          );
-          if (!active) return null;
-          return active.getAttribute('data-date') || active.getAttribute('data-day') || active.getAttribute('datetime') || norm(active.innerText || active.textContent);
+          const select = document.querySelectorAll('select')[index];
+          if (!select) return [];
+          return [...select.options]
+            .map((o, i) => ({index: i, value: o.value, text: norm(o.textContent), disabled: o.disabled}))
+            .filter(o => !o.disabled && o.text && o.value !== '');
         }
-        """
+        """,
+        select_index,
     )
-    return _clean(value) or datetime.now().astimezone().date().isoformat()
+
+
+def _normalize_date_label(value: str, text: str) -> str:
+    value = _clean(value)
+    text = _clean(text)
+    for candidate in (value, text):
+        match = re.search(r"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b", candidate)
+        if match:
+            y, m, d = map(int, match.groups())
+            return f"{y:04d}-{m:02d}-{d:02d}"
+    upper = text.upper()
+    today = datetime.now(MADRID).date()
+    if upper == "HOY":
+        return today.isoformat()
+    if upper in {"MAÑANA", "MANANA"}:
+        from datetime import timedelta
+        return (today + timedelta(days=1)).isoformat()
+    return text or value or today.isoformat()
 
 
 def _extract_visible_movies(page, cinema: dict, date_label: str) -> list[dict]:
-    """Start from actual booking links, then find the smallest VOSE movie card around each link."""
     rows = page.evaluate(
         """
         ({ markers }) => {
           const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
           const upper = (s) => norm(s).toLocaleUpperCase('es-ES');
-          const isEnglish = (s) => markers.some((m) => upper(s).includes(m));
+          const isEnglish = (s) => markers.some(m => upper(s).includes(m));
           const timeRe = /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/;
+          const isBooking = (a) => /compra\.yelmocines\.es|showtimeVistaId|cinemaVistaId/i.test(a.getAttribute('href') || '');
 
-          const bookingAnchors = [...document.querySelectorAll('a[href]')].filter((a) => {
-            const href = a.getAttribute('href') || '';
-            const text = norm(a.innerText || a.textContent);
-            return timeRe.test(text) && /compra\.yelmocines\.es|showtimeVistaId|cinemaVistaId/i.test(href);
-          });
+          const result = [];
+          const headings = [...document.querySelectorAll('h3')];
 
-          const out = [];
-          for (const anchor of bookingAnchors) {
-            const timeMatch = norm(anchor.innerText || anchor.textContent).match(timeRe);
-            if (!timeMatch) continue;
+          for (const heading of headings) {
+            const title = norm(heading.innerText || heading.textContent);
+            if (!title) continue;
 
-            let card = anchor;
+            let card = heading;
             let chosen = null;
-            for (let depth = 0; depth < 9 && card; depth++, card = card.parentElement) {
+            for (let depth = 0; depth < 8 && card; depth++, card = card.parentElement) {
+              const h3s = [...card.querySelectorAll('h3')];
+              const bookings = [...card.querySelectorAll('a[href]')].filter(isBooking);
               const text = norm(card.innerText || card.textContent);
-              if (!isEnglish(text) || text.length > 2200) continue;
-
-              const bookingCount = [...card.querySelectorAll('a[href]')].filter((a) => {
-                const href = a.getAttribute('href') || '';
-                return /compra\.yelmocines\.es|showtimeVistaId|cinemaVistaId/i.test(href);
-              }).length;
-
-              const headings = [...card.querySelectorAll('h1,h2,h3,h4,h5,[class*="title" i]')]
-                .map((el) => norm(el.innerText || el.textContent))
-                .filter(Boolean)
-                .filter((t) => !isEnglish(t) && t.length <= 160);
-
-              if (bookingCount >= 1 && headings.length >= 1) {
-                chosen = {card, headings};
+              if (h3s.length === 1 && bookings.length > 0 && text.length < 2200) {
+                chosen = card;
                 break;
               }
             }
             if (!chosen) continue;
 
-            const { card: movieCard, headings } = chosen;
-            let title = headings.find((t) => !timeRe.test(t)) || headings[0];
+            const cardText = norm(chosen.innerText || chosen.textContent);
+            if (!isEnglish(cardText)) continue;
 
-            // Prefer a link around the title; otherwise keep the cinema URL as fallback.
             let filmHref = null;
-            const titleEls = [...movieCard.querySelectorAll('h1,h2,h3,h4,h5,[class*="title" i]')];
-            for (const el of titleEls) {
-              if (norm(el.innerText || el.textContent) !== title) continue;
-              const link = el.closest('a[href]') || el.querySelector('a[href]');
-              if (link) {
-                filmHref = link.getAttribute('href');
+            const headingLink = heading.closest('a[href]') || heading.querySelector('a[href]');
+            if (headingLink) filmHref = headingLink.getAttribute('href');
+
+            const englishBlocks = [...chosen.querySelectorAll('*')].filter((el) => {
+              const text = norm(el.innerText || el.textContent);
+              if (!isEnglish(text)) return false;
+              return ![...el.children].some(child => isEnglish(norm(child.innerText || child.textContent)));
+            });
+
+            const showtimes = [];
+            const seen = new Set();
+            for (const lang of englishBlocks) {
+              let block = lang;
+              for (let depth = 0; depth < 6 && block && chosen.contains(block); depth++, block = block.parentElement) {
+                const anchors = [...block.querySelectorAll('a[href]')].filter(a => isBooking(a) && timeRe.test(norm(a.innerText || a.textContent)));
+                if (!anchors.length) continue;
+                for (const a of anchors) {
+                  const match = norm(a.innerText || a.textContent).match(timeRe);
+                  if (!match) continue;
+                  const key = `${match[0]}|${a.getAttribute('href') || ''}`;
+                  if (seen.has(key)) continue;
+                  seen.add(key);
+                  showtimes.push({time: match[0], href: a.getAttribute('href')});
+                }
                 break;
               }
             }
 
-            out.push({
-              title,
-              filmHref,
-              time: timeMatch[0],
-              showtimeHref: anchor.getAttribute('href'),
-            });
+            if (showtimes.length) result.push({title, filmHref, showtimes});
           }
-          return out;
+          return result;
         }
         """,
         {"markers": [m.upper() for m in ENGLISH_MARKERS]},
     )
 
-    movies: dict[str, dict] = {}
+    movies: list[dict] = []
     for row in rows:
         title = _clean(row.get("title"))
-        if not _looks_like_real_title(title):
+        if not _is_real_title(title):
             continue
-        film_url = _absolute(cinema["url"], row.get("filmHref"))
-        showtime_url = _absolute(cinema["url"], row.get("showtimeHref"))
-        time_text = _clean(row.get("time"))
-        if not TIME_RE.fullmatch(time_text):
+        slots = []
+        seen = set()
+        for raw in row.get("showtimes", []):
+            time_text = _clean(raw.get("time"))
+            url = _absolute(cinema["url"], raw.get("href"))
+            if not TIME_RE.fullmatch(time_text):
+                continue
+            key = (time_text, url)
+            if key in seen:
+                continue
+            seen.add(key)
+            slots.append({"time": time_text, "url": url})
+        if not slots:
             continue
-
-        key = title.casefold()
-        movie = movies.setdefault(
-            key,
-            {
-                "title": title,
-                "url": film_url,
-                "language": "VOSE",
-                "dates": [{"date": date_label, "showtimes": []}],
-            },
-        )
-        slots = movie["dates"][0]["showtimes"]
-        if not any(slot["time"] == time_text and slot["url"] == showtime_url for slot in slots):
-            slots.append({"time": time_text, "url": showtime_url})
-
-    result = list(movies.values())
-    for movie in result:
-        movie["dates"][0]["showtimes"].sort(key=lambda s: s["time"])
-    return result
+        slots.sort(key=lambda x: x["time"])
+        movies.append({
+            "title": title,
+            "url": _absolute(cinema["url"], row.get("filmHref")),
+            "language": "VOSE",
+            "dates": [{"date": date_label, "showtimes": slots}],
+        })
+    return movies
 
 
-def _merge_date_movies(target: dict[str, dict], items: list[dict]) -> None:
+def _merge_movies(target: dict[str, dict], items: list[dict]) -> None:
     for item in items:
         key = item["title"].casefold()
         if key not in target:
             target[key] = item
             continue
         existing = target[key]
-        if existing.get("url", "").endswith("cartelera") and item.get("url"):
-            existing["url"] = item["url"]
-        for day in item.get("dates", []):
-            if not any(d.get("date") == day.get("date") for d in existing["dates"]):
+        for day in item["dates"]:
+            current = next((d for d in existing["dates"] if d["date"] == day["date"]), None)
+            if current is None:
                 existing["dates"].append(day)
+                continue
+            seen = {(s["time"], s["url"]) for s in current["showtimes"]}
+            for slot in day["showtimes"]:
+                if (slot["time"], slot["url"]) not in seen:
+                    current["showtimes"].append(slot)
+            current["showtimes"].sort(key=lambda s: s["time"])
 
 
 def _scrape_cinema(page, cinema: dict) -> dict:
@@ -267,57 +274,39 @@ def _scrape_cinema(page, cinema: dict) -> dict:
             timeout=15_000,
         )
     except PlaywrightTimeoutError:
-        page.wait_for_timeout(3_000)
+        page.wait_for_timeout(3000)
 
     merged: dict[str, dict] = {}
+    select_index = _find_day_select(page)
 
-    # Always scrape the initially selected date.
-    initial_date = _current_date_label(page)
-    _merge_date_movies(merged, _extract_visible_movies(page, cinema, initial_date))
-
-    # Then visit each visible date selector. Re-discover the DOM before every click,
-    # because Yelmo may rerender the schedule after selecting a date.
-    descriptors = _date_controls(page)
-    for descriptor in descriptors:
-        text = _clean(descriptor.get("text"))
-        data_date = _clean(descriptor.get("dataDate"))
-        data_day = _clean(descriptor.get("dataDay"))
-        datetime_value = _clean(descriptor.get("datetime"))
-
-        clicked = page.evaluate(
-            """
-            ({ text, dataDate, dataDay, datetimeValue }) => {
-              const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
-              const candidates = [...document.querySelectorAll('button,[role="tab"],[data-date],[data-day],[datetime]')];
-              const el = candidates.find((node) => {
-                if (dataDate && node.getAttribute('data-date') === dataDate) return true;
-                if (dataDay && node.getAttribute('data-day') === dataDay) return true;
-                if (datetimeValue && node.getAttribute('datetime') === datetimeValue) return true;
-                return text && norm(node.innerText || node.textContent) === text;
-              });
-              if (!el) return false;
-              el.click();
-              return true;
-            }
-            """,
-            {"text": text, "dataDate": data_date, "dataDay": data_day, "datetimeValue": datetime_value},
-        )
-        if not clicked:
-            continue
-        page.wait_for_timeout(900)
-        date_label = data_date or data_day or datetime_value or text or _current_date_label(page)
-        items = _extract_visible_movies(page, cinema, date_label)
-        _merge_date_movies(merged, items)
+    if select_index is None:
+        today = datetime.now(MADRID).date().isoformat()
+        _merge_movies(merged, _extract_visible_movies(page, cinema, today))
+    else:
+        options = _day_options(page, select_index)
+        if not options:
+            today = datetime.now(MADRID).date().isoformat()
+            _merge_movies(merged, _extract_visible_movies(page, cinema, today))
+        else:
+            for option in options[:14]:
+                locator = page.locator("select").nth(select_index)
+                try:
+                    locator.select_option(value=option["value"])
+                except Exception:
+                    locator.select_option(index=option["index"])
+                page.wait_for_timeout(1100)
+                date_label = _normalize_date_label(option["value"], option["text"])
+                _merge_movies(merged, _extract_visible_movies(page, cinema, date_label))
 
     movies = list(merged.values())
     for movie in movies:
-        movie["dates"].sort(key=lambda d: d.get("date", ""))
-    movies.sort(key=lambda movie: movie["title"].casefold())
+        movie["dates"].sort(key=lambda d: d["date"])
+    movies.sort(key=lambda m: m["title"].casefold())
     return {"name": cinema["name"], "url": cinema["url"], "movies": movies}
 
 
 def get_english_showtimes(force_refresh: bool = False) -> dict:
-    del force_refresh  # Kept for compatibility with the static generator.
+    del force_refresh
     cinemas = []
     errors = []
 
@@ -331,7 +320,6 @@ def get_english_showtimes(force_refresh: bool = False) -> dict:
                 "(KHTML, like Gecko) Chrome/129.0 Safari/537.36"
             ),
         )
-
         for cinema in CINEMAS:
             page = context.new_page()
             try:
@@ -341,12 +329,11 @@ def get_english_showtimes(force_refresh: bool = False) -> dict:
                 cinemas.append({"name": cinema["name"], "url": cinema["url"], "movies": []})
             finally:
                 page.close()
-
         context.close()
         browser.close()
 
     payload = {
-        "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "updated_at": datetime.now(MADRID).isoformat(timespec="seconds"),
         "cinemas": cinemas,
     }
     if errors:
