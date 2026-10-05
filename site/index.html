@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="English-language (VOSE) Yelmo screenings in Málaga.">
+  <title>Movie Checker</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Yelmo · Málaga</p>
+        <h1>Movie Checker</h1>
+        <p class="subtitle">English-language (VOSE) screenings.</p>
+      </div>
+      <button id="reload" type="button">Reload</button>
+    </header>
+
+    <p id="status" class="status">Loading latest published showtimes…</p>
+    <section id="cinemas" aria-live="polite"></section>
+  </main>
+
+  <script>
+    const cinemasEl = document.querySelector('#cinemas');
+    const statusEl = document.querySelector('#status');
+    const reloadButton = document.querySelector('#reload');
+
+    const escapeHtml = (value) => String(value ?? '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+
+    const safeUrl = (value) => {
+      try {
+        const url = new URL(value);
+        return ['http:', 'https:'].includes(url.protocol) ? url.href : '#';
+      } catch {
+        return '#';
+      }
+    };
+
+    function render(data) {
+      const cinemas = data.cinemas || [];
+      const total = cinemas.reduce((sum, cinema) => sum + (cinema.movies || []).length, 0);
+      const updated = data.updated_at ? new Date(data.updated_at) : null;
+      const updatedText = updated && !Number.isNaN(updated.valueOf())
+        ? updated.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
+        : 'unknown time';
+
+      statusEl.textContent = total
+        ? `${total} English-language ${total === 1 ? 'movie' : 'movies'} found · data updated ${updatedText}`
+        : `No English-language (VOSE) sessions found · data updated ${updatedText}`;
+
+      cinemasEl.innerHTML = cinemas.map((cinema) => {
+        const movies = cinema.movies || [];
+        if (!movies.length) return '';
+
+        return `
+          <section class="cinema">
+            <div class="cinema-heading">
+              <h2>${escapeHtml(cinema.name)}</h2>
+              <a href="${safeUrl(cinema.url)}" target="_blank" rel="noopener noreferrer">Yelmo ↗</a>
+            </div>
+            <div class="movie-list">
+              ${movies.map((movie) => `
+                <article class="movie">
+                  <div class="movie-copy">
+                    <a class="movie-title" href="${safeUrl(movie.url)}" target="_blank" rel="noopener noreferrer">
+                      ${escapeHtml(movie.title)}
+                    </a>
+                    <span class="badge">${escapeHtml(movie.language || 'VOSE')}</span>
+                  </div>
+                  <div class="times" aria-label="Showtimes for ${escapeHtml(movie.title)}">
+                    ${(movie.showtimes || []).map((showtime) => `
+                      <a class="time" href="${safeUrl(showtime.url)}" target="_blank" rel="noopener noreferrer" title="Open ${escapeHtml(showtime.time)} on Yelmo">
+                        ${escapeHtml(showtime.time)}
+                      </a>
+                    `).join('')}
+                  </div>
+                </article>
+              `).join('')}
+            </div>
+          </section>
+        `;
+      }).join('');
+    }
+
+    async function load() {
+      reloadButton.disabled = true;
+      statusEl.textContent = 'Loading latest published showtimes…';
+      try {
+        // Cache-busting only reloads the JSON from GitHub Pages. It never calls Yelmo.
+        const response = await fetch(`./data/movies.json?v=${Date.now()}`, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        render(await response.json());
+      } catch (error) {
+        cinemasEl.innerHTML = '';
+        statusEl.textContent = `Could not load published showtimes: ${error.message}`;
+      } finally {
+        reloadButton.disabled = false;
+      }
+    }
+
+    reloadButton.addEventListener('click', load);
+    load();
+  </script>
+</body>
+</html>
