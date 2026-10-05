@@ -34,9 +34,6 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Install Playwright Chromium
-        run: python -m playwright install --with-deps chromium
-
       - name: Build static site
         run: |
           rm -rf _site
@@ -45,6 +42,21 @@ jobs:
           cp site/styles.css _site/styles.css
           touch _site/.nojekyll
           python generate_data.py --output _site/data/movies.json
+
+      - name: Verify published data has usable content
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('_site/data/movies.json').read_text())
+          cities = data.get('cities') or []
+          movies = [m for c in cities for cinema in c.get('cinemas', []) for m in cinema.get('movies', [])]
+          sessions = [s for m in movies for d in m.get('dates', []) for s in d.get('showtimes', [])]
+          dates = {d.get('date') for m in movies for d in m.get('dates', []) if d.get('showtimes')}
+          print(f"movies={len(movies)} dates={len(dates)} sessions={len(sessions)} source_status={data.get('source_status')}")
+          if data.get('source_status') != 'ok' or not movies or not sessions:
+              raise SystemExit('No usable English-language movie data was produced')
+          PY
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
