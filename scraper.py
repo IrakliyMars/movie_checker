@@ -50,9 +50,6 @@ def _plain(value: object) -> str:
 
 def _is_english_format(language: object) -> bool:
     label = _plain(language)
-    # Yelmo currently marks its English-subtitled sessions as VOSE. Keep a
-    # couple of explicit English labels too, but do not accept generic VO: it
-    # can be an original language other than English.
     return any(marker in label for marker in (
         "vose",
         "ingles subtitulado",
@@ -76,7 +73,6 @@ def _date_from_day(day: dict) -> str:
         local = datetime.fromtimestamp(milliseconds / 1000, tz=timezone.utc).astimezone(MADRID)
         return local.date().isoformat()
 
-    # Fallback for the human label returned by Yelmo, e.g. "6 octubre".
     label = _plain(day.get("ShowtimeDate"))
     match = re.search(r"\b(\d{1,2})\s+([a-z]+)\b", label)
     if match and match.group(2) in SPANISH_MONTHS:
@@ -84,7 +80,6 @@ def _date_from_day(day: dict) -> str:
         month = SPANISH_MONTHS[match.group(2)]
         today = datetime.now(MADRID).date()
         year = today.year
-        # Published schedules can cross New Year.
         if month < today.month - 6:
             year += 1
         elif month > today.month + 6:
@@ -123,17 +118,14 @@ def _session_datetime(date_value: str, time_value: str) -> str | None:
 
 
 def _fetch_city(city_key: str) -> dict:
+    # This exact minimal header set matches the XHR request used by Yelmo's
+    # own cartelera endpoint and by another currently-active GitHub Actions
+    # scraper. Extra browser headers can make the request more suspicious.
     headers = {
         "accept": "application/json, text/javascript, */*; q=0.01",
-        "accept-language": "es-ES,es;q=0.9,en;q=0.8",
+        "accept-language": "es-ES,es;q=0.9,de;q=0.8",
         "content-type": "application/json; charset=UTF-8",
         "x-requested-with": "XMLHttpRequest",
-        "referer": f"{YELMO_BASE}/cartelera/{city_key}/",
-        "origin": YELMO_BASE,
-        "user-agent": (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/129.0 Safari/537.36"
-        ),
     }
     response = requests.post(
         NOW_PLAYING_URL,
@@ -154,11 +146,8 @@ def _parse_cinema(raw_cinema: dict) -> dict:
     cinema_url = _cinema_url(raw_cinema)
     movies: dict[str, dict] = {}
 
-    # Crucially, iterate EVERY date Yelmo publishes. There is no arbitrary
-    # today-only or 14-day limit here.
     for raw_day in raw_cinema.get("Dates") or []:
         date_value = _date_from_day(raw_day)
-
         for raw_movie in raw_day.get("Movies") or []:
             title = _clean(raw_movie.get("Title"))
             if not _is_real_title(title):
@@ -169,18 +158,16 @@ def _parse_cinema(raw_cinema: dict) -> dict:
                 language = _clean(raw_format.get("Language"))
                 if not _is_english_format(language):
                     continue
-
                 for raw_showtime in raw_format.get("Showtimes") or []:
                     time_value = _clean(raw_showtime.get("Time"))
                     if not TIME_RE.fullmatch(time_value):
                         continue
-                    slot = {
+                    slots.append({
                         "time": time_value,
                         "datetime": _session_datetime(date_value, time_value),
                         "url": _session_url(raw_showtime, cinema_url),
                         "format": _clean(raw_format.get("Name") or raw_format.get("Format")),
-                    }
-                    slots.append(slot)
+                    })
 
             if not slots:
                 continue
@@ -224,14 +211,9 @@ def get_english_showtimes(force_refresh: bool = False) -> dict:
     del force_refresh
     data = _fetch_city(CITY_KEY)
     cinemas = [_parse_cinema(cinema) for cinema in data.get("Cinemas") or []]
-
     return {
         "updated_at": datetime.now(MADRID).isoformat(timespec="seconds"),
         "source_status": "ok",
         "source": "Yelmo GetNowPlaying",
-        "cities": [{
-            "id": CITY_KEY,
-            "name": CITY_NAME,
-            "cinemas": cinemas,
-        }],
+        "cities": [{"id": CITY_KEY, "name": CITY_NAME, "cinemas": cinemas}],
     }
