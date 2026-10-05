@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="English-language (VOSE) Yelmo screenings in Málaga.">
+  <meta name="description" content="English-language Yelmo screenings by city, date and cinema.">
   <title>Movie Checker</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
@@ -11,101 +11,135 @@
   <main class="shell">
     <header class="topbar">
       <div>
-        <p class="eyebrow">Yelmo · Málaga</p>
+        <p class="eyebrow">Yelmo · English screenings</p>
         <h1>Movie Checker</h1>
-        <p class="subtitle">English-language (VOSE) screenings by date.</p>
+        <p class="subtitle">Only movies that actually have English-language sessions.</p>
       </div>
       <button id="reload" type="button">Reload</button>
     </header>
 
+    <div class="controls">
+      <label for="city">City</label>
+      <select id="city"></select>
+    </div>
+
     <p id="status" class="status">Loading latest published showtimes…</p>
-    <section id="cinemas" aria-live="polite"></section>
+    <section id="movies" class="movie-list" aria-live="polite"></section>
   </main>
 
   <script>
-    const cinemasEl = document.querySelector('#cinemas');
+    const moviesEl = document.querySelector('#movies');
     const statusEl = document.querySelector('#status');
+    const cityEl = document.querySelector('#city');
     const reloadButton = document.querySelector('#reload');
+    let payload = null;
 
     const escapeHtml = (value) => String(value ?? '')
-      .replaceAll('&', '&amp;')
-      .replaceAll('<', '&lt;')
-      .replaceAll('>', '&gt;')
-      .replaceAll('"', '&quot;')
-      .replaceAll("'", '&#039;');
+      .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;').replaceAll("'", '&#039;');
 
     const safeUrl = (value) => {
       try {
         const url = new URL(value);
         return ['http:', 'https:'].includes(url.protocol) ? url.href : '#';
-      } catch {
-        return '#';
-      }
+      } catch { return '#'; }
     };
 
     const formatDate = (value) => {
       if (!value) return 'Date';
-      const iso = /^\d{4}-\d{2}-\d{2}/.test(value) ? new Date(`${value.slice(0, 10)}T12:00:00`) : null;
-      if (iso && !Number.isNaN(iso.valueOf())) {
-        return iso.toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
-      }
-      return value;
+      const d = /^\d{4}-\d{2}-\d{2}/.test(value) ? new Date(`${value.slice(0,10)}T12:00:00`) : null;
+      return d && !Number.isNaN(d.valueOf())
+        ? d.toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' })
+        : value;
     };
 
-    function render(data) {
-      const cinemas = data.cinemas || [];
-      const total = cinemas.reduce((sum, cinema) => sum + (cinema.movies || []).length, 0);
-      const updated = data.updated_at ? new Date(data.updated_at) : null;
+    function normalizeCities(data) {
+      if (Array.isArray(data.cities)) return data.cities;
+      return [{ id: 'malaga', name: 'Málaga', cinemas: data.cinemas || [] }];
+    }
+
+    function aggregateMovies(city) {
+      const map = new Map();
+      for (const cinema of city.cinemas || []) {
+        for (const movie of cinema.movies || []) {
+          const key = (movie.id || movie.title || '').toString().toLocaleLowerCase('es-ES');
+          if (!key) continue;
+          if (!map.has(key)) map.set(key, {
+            id: movie.id || key,
+            title: movie.title,
+            url: movie.url,
+            language: movie.language || 'VOSE',
+            dates: new Map(),
+          });
+          const target = map.get(key);
+          for (const day of movie.dates || []) {
+            if (!target.dates.has(day.date)) target.dates.set(day.date, []);
+            const rows = target.dates.get(day.date);
+            for (const s of day.showtimes || []) {
+              const row = {
+                cinema: cinema.name,
+                cinemaUrl: cinema.url,
+                time: s.time,
+                datetime: s.datetime,
+                url: s.url || movie.url || cinema.url,
+              };
+              if (!rows.some(x => x.cinema === row.cinema && x.time === row.time && x.url === row.url)) rows.push(row);
+            }
+          }
+        }
+      }
+      return [...map.values()]
+        .filter(movie => [...movie.dates.values()].some(rows => rows.length))
+        .sort((a,b) => a.title.localeCompare(b.title));
+    }
+
+    function renderCity() {
+      const cities = normalizeCities(payload || {});
+      const city = cities.find(c => String(c.id) === cityEl.value) || cities[0];
+      if (!city) return;
+      const movies = aggregateMovies(city);
+      const updated = payload?.updated_at ? new Date(payload.updated_at) : null;
       const updatedText = updated && !Number.isNaN(updated.valueOf())
-        ? updated.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })
-        : 'unknown time';
+        ? updated.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'unknown time';
 
-      statusEl.textContent = total
-        ? `${total} English-language ${total === 1 ? 'movie' : 'movies'} found · data updated ${updatedText}`
-        : `No English-language (VOSE) sessions found · data updated ${updatedText}`;
+      statusEl.textContent = movies.length
+        ? `${movies.length} English-language ${movies.length === 1 ? 'movie' : 'movies'} in ${city.name} · updated ${updatedText}`
+        : `No English-language sessions published for ${city.name} · updated ${updatedText}`;
 
-      cinemasEl.innerHTML = cinemas.map((cinema) => {
-        const movies = cinema.movies || [];
-        if (!movies.length) return '';
-
+      moviesEl.innerHTML = movies.map(movie => {
+        const days = [...movie.dates.entries()].sort(([a],[b]) => String(a).localeCompare(String(b)));
         return `
-          <section class="cinema">
-            <div class="cinema-heading">
-              <h2>${escapeHtml(cinema.name)}</h2>
-              <a href="${safeUrl(cinema.url)}" target="_blank" rel="noopener noreferrer">Yelmo ↗</a>
+          <article class="movie">
+            <div class="movie-heading-row">
+              <a class="movie-title" href="${safeUrl(movie.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(movie.title)}</a>
+              <span class="badge">${escapeHtml(movie.language)}</span>
             </div>
-            <div class="movie-list">
-              ${movies.map((movie) => `
-                <article class="movie">
-                  <div class="movie-copy">
-                    <div class="movie-heading-row">
-                      <a class="movie-title" href="${safeUrl(movie.url)}" target="_blank" rel="noopener noreferrer">
-                        ${escapeHtml(movie.title)}
+            <div class="schedule">
+              ${days.map(([date, rows]) => `
+                <section class="day-block">
+                  <h2 class="day-label">${escapeHtml(formatDate(date))}</h2>
+                  <div class="sessions">
+                    ${rows.sort((a,b) => (a.time || '').localeCompare(b.time || '') || a.cinema.localeCompare(b.cinema)).map(s => `
+                      <a class="session" href="${safeUrl(s.url)}" target="_blank" rel="noopener noreferrer">
+                        <span class="session-cinema">${escapeHtml(s.cinema)}</span>
+                        <span class="session-time">${escapeHtml(s.time)}</span>
                       </a>
-                      <span class="badge">${escapeHtml(movie.language || 'VOSE')}</span>
-                    </div>
-
-                    <div class="schedule">
-                      ${(movie.dates || []).map((day) => `
-                        <div class="day-row">
-                          <div class="day-label">${escapeHtml(formatDate(day.date))}</div>
-                          <div class="times" aria-label="Showtimes for ${escapeHtml(movie.title)} on ${escapeHtml(day.date)}">
-                            ${(day.showtimes || []).map((showtime) => `
-                              <a class="time" href="${safeUrl(showtime.url)}" target="_blank" rel="noopener noreferrer" title="Open ${escapeHtml(showtime.time)} on Yelmo">
-                                ${escapeHtml(showtime.time)}
-                              </a>
-                            `).join('')}
-                          </div>
-                        </div>
-                      `).join('')}
-                    </div>
+                    `).join('')}
                   </div>
-                </article>
+                </section>
               `).join('')}
             </div>
-          </section>
-        `;
+          </article>`;
       }).join('');
+    }
+
+    function render(data) {
+      payload = data;
+      const cities = normalizeCities(data);
+      cityEl.innerHTML = cities.map(c => `<option value="${escapeHtml(c.id)}">${escapeHtml(c.name)}</option>`).join('');
+      const malaga = cities.find(c => /m[aá]laga/i.test(c.name));
+      if (malaga) cityEl.value = String(malaga.id);
+      renderCity();
     }
 
     async function load() {
@@ -116,13 +150,12 @@
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         render(await response.json());
       } catch (error) {
-        cinemasEl.innerHTML = '';
+        moviesEl.innerHTML = '';
         statusEl.textContent = `Could not load published showtimes: ${error.message}`;
-      } finally {
-        reloadButton.disabled = false;
-      }
+      } finally { reloadButton.disabled = false; }
     }
 
+    cityEl.addEventListener('change', renderCity);
     reloadButton.addEventListener('click', load);
     load();
   </script>
