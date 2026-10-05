@@ -1,15 +1,41 @@
 # Movie Checker
 
-A tiny GitHub Pages site that shows **English-language / VOSE screenings at Yelmo cinemas in Málaga**.
+A tiny GitHub Pages site for **English-language / VOSE screenings at Yelmo cinemas**, grouped the way a moviegoer needs them:
 
-It checks:
+```text
+City
+  Movie
+    Date
+      Cinema — clickable showtime
+```
 
-- Yelmo Vialia Málaga
-- Yelmo Plaza Mayor
+Málaga is the default city. Its Yelmo locations are:
 
-Movie titles are clickable. Each showtime is clickable too: when Yelmo exposes a direct session/booking URL, Movie Checker keeps that URL; otherwise it falls back to the relevant film or cinema page.
+- Vialia Málaga
+- Plaza Mayor
+- Rincón de la Victoria
 
-## Architecture
+Only movies that actually have English-language / VOSE sessions are shown. A movie with no qualifying sessions is not rendered.
+
+## Frontend
+
+The static frontend supports a city selector and aggregates the same film across cinemas. Under each movie it shows every published date, then the cinema name and individual clickable showtimes for that date.
+
+The data format is city-based so additional cities can be added without redesigning the frontend:
+
+```json
+{
+  "cities": [
+    {
+      "id": "malaga",
+      "name": "Málaga",
+      "cinemas": []
+    }
+  ]
+}
+```
+
+## GitHub-only architecture
 
 There is **no public backend API and no personal server**.
 
@@ -17,68 +43,38 @@ There is **no public backend API and no personal server**.
 GitHub Actions (every 2 hours)
         |
         v
-Playwright scraper -> movies.json
+schedule collector -> movies.json
         |
         v
 GitHub Pages -> visitors
 ```
 
-Visitors only download static HTML/CSS and the already-generated `movies.json` from GitHub Pages. Opening or reloading the site never scrapes Yelmo.
-
-This means traffic to the public site cannot multiply requests to Yelmo. Whether one person or many people open Movie Checker, Yelmo is contacted only by the scheduled GitHub Actions job.
+Visitors only download static HTML/CSS and the already-generated `movies.json`. Opening or reloading Movie Checker does not trigger a request to Yelmo.
 
 ## Rate / overload protection
 
-The workflow is intentionally conservative:
+- refresh at most once every **2 hours**
+- only one deployment workflow may run at once
+- build timeout prevents stuck collectors
+- no user-accessible scraping endpoint
+- Reload only reloads static JSON from GitHub Pages
+- an empty or obviously malformed result is rejected, so it cannot overwrite the previous known-good deployment
 
-- scheduled once every **2 hours** in `Europe/Madrid`
-- only one Movie Checker deployment workflow can run at a time (`concurrency`)
-- scraper/build timeout prevents stuck jobs
-- no user-accessible endpoint can trigger scraping
-- the frontend Reload button only reloads the static JSON from GitHub Pages
-- if scraping clearly fails and produces no usable movie data, deployment aborts and the previous successful Pages version stays live
+## Current source constraint
 
-A manual refresh is still possible from **GitHub → Actions → Refresh movies and deploy Pages → Run workflow**.
+Yelmo currently places its public schedule pages behind Cloudflare anti-bot protection. GitHub-hosted runners can be rejected even when the same pages work normally in a consumer browser. Movie Checker does **not** attempt to bypass that protection and does not embed private credentials.
+
+The frontend and data model are intentionally independent from the collector, so a permitted JSON/feed source can replace the collector without changing the site UI.
 
 ## Files
 
-- `scraper.py` — reads Yelmo with headless Chromium and extracts VOSE movies/showtimes
-- `generate_data.py` — generates `movies.json` and validates the scrape
-- `site/index.html` — static frontend
+- `scraper.py` — current schedule collector and Málaga cinema definitions
+- `generate_data.py` — generates and validates `movies.json`
+- `site/index.html` — static city/movie/date/cinema frontend
 - `site/styles.css` — styles
-- `.github/workflows/deploy-pages.yml` — scheduled scraping + GitHub Pages deployment
-- `requirements.txt` — Playwright dependency
+- `.github/workflows/deploy-pages.yml` — scheduled GitHub Pages build/deploy
+- `requirements.txt` — collector dependencies
 
-## GitHub Pages setup
+## GitHub Pages
 
-The workflow uses GitHub's official Pages Actions. In repository settings, set the Pages publishing source to **GitHub Actions**:
-
-**Settings → Pages → Build and deployment → Source → GitHub Actions**
-
-After that, run the workflow once manually or push to `main`. Scheduled refreshes happen automatically every two hours.
-
-> GitHub Pages from a private personal repository requires a GitHub plan that supports Pages for private repositories. The published Pages site itself may still be public depending on your GitHub account/organization setup.
-
-## Optional local scrape test
-
-Python 3.11+ is recommended.
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python -m playwright install chromium
-python generate_data.py
-```
-
-That writes `site/data/movies.json` locally. You can then serve the `site` directory with any static web server, for example:
-
-```bash
-python -m http.server 8000 -d site
-```
-
-Open `http://127.0.0.1:8000`.
-
-## If Yelmo changes its website
-
-The likely file to update is `scraper.py`. The frontend and GitHub Pages deployment are deliberately independent of Yelmo's DOM structure.
+Pages is deployed through GitHub Actions. In repository settings the publishing source should be **GitHub Actions**.
