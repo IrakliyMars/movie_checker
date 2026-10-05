@@ -15,7 +15,7 @@ permissions:
 
 concurrency:
   group: movie-checker-pages
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -36,16 +36,6 @@ jobs:
 
       - name: Install Playwright Chromium
         run: python -m playwright install --with-deps chromium
-
-      - name: Capture temporary Yelmo diagnostics
-        run: python debug_yelmo.py
-
-      - name: Upload temporary diagnostics
-        uses: actions/upload-artifact@v4
-        with:
-          name: yelmo-debug
-          path: debug-output.json
-          retention-days: 1
 
       - name: Build static site
         run: |
