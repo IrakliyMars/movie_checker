@@ -13,14 +13,13 @@ body {
 }
 
 .shell {
-  width: min(760px, calc(100% - 32px));
+  width: min(820px, calc(100% - 32px));
   margin: 0 auto;
   padding: 56px 0 80px;
 }
 
 .topbar,
-.cinema-heading,
-.movie {
+.cinema-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -29,7 +28,8 @@ body {
 
 .eyebrow,
 .subtitle,
-.status {
+.status,
+.day-label {
   color: color-mix(in srgb, CanvasText 60%, transparent);
 }
 
@@ -78,7 +78,7 @@ button:disabled {
   font-size: 14px;
 }
 
-.cinema { margin-top: 36px; }
+.cinema { margin-top: 40px; }
 
 .cinema-heading {
   padding-bottom: 10px;
@@ -103,31 +103,54 @@ a {
 .movie-list { display: grid; }
 
 .movie {
-  padding: 18px 0;
+  padding: 22px 0;
   border-bottom: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
 }
 
 .movie-copy { min-width: 0; }
 
+.movie-heading-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .movie-title {
-  display: inline;
-  font-weight: 700;
+  font-weight: 750;
+  font-size: 18px;
   text-decoration: none;
 }
 
 .movie-title:hover { text-decoration: underline; }
 
 .badge {
-  margin-left: 8px;
   font-size: 10px;
   font-weight: 800;
   letter-spacing: .08em;
   opacity: .55;
 }
 
+.schedule {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.day-row {
+  display: grid;
+  grid-template-columns: minmax(105px, 140px) 1fr;
+  align-items: center;
+  gap: 14px;
+}
+
+.day-label {
+  font-size: 13px;
+  font-weight: 650;
+}
+
 .times {
   display: flex;
-  justify-content: flex-end;
   flex-wrap: wrap;
   gap: 7px;
 }
@@ -142,6 +165,8 @@ a {
 @media (max-width: 600px) {
   .shell { padding-top: 32px; }
   .topbar { align-items: flex-start; }
-  .movie { align-items: flex-start; flex-direction: column; gap: 12px; }
-  .times { justify-content: flex-start; }
+  .day-row {
+    grid-template-columns: 1fr;
+    gap: 7px;
+  }
 }
