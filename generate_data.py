@@ -6,6 +6,15 @@ from pathlib import Path
 
 from scraper import get_english_showtimes
 
+BAD_TITLES = {
+    "ayuda",
+    "cine yelmo",
+    "catálogo de películas",
+    "catalogo de peliculas",
+    "cambiar de país",
+    "cambiar de pais",
+}
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate static Movie Checker data")
@@ -14,14 +23,18 @@ def main() -> None:
 
     payload = get_english_showtimes(force_refresh=True)
     cinemas = payload.get("cinemas", [])
-    movie_count = sum(len(cinema.get("movies", [])) for cinema in cinemas)
+    movies = [movie for cinema in cinemas for movie in cinema.get("movies", [])]
     warnings = payload.get("warnings", [])
 
-    # If scraping clearly failed, abort the deployment. GitHub Pages then keeps
-    # serving the previous successful deployment instead of replacing it with
-    # an empty/broken one.
-    if warnings and movie_count == 0:
-        raise RuntimeError("Scraper returned no movies and reported errors: " + "; ".join(warnings))
+    # Never replace the last known-good Pages deployment with an empty or
+    # obviously misparsed result.
+    if not movies:
+        detail = "; ".join(warnings) if warnings else "no VOSE movie cards were parsed"
+        raise RuntimeError("Refusing to deploy empty movie data: " + detail)
+
+    bad = [movie.get("title", "") for movie in movies if movie.get("title", "").strip().casefold() in BAD_TITLES]
+    if bad:
+        raise RuntimeError("Refusing to deploy suspicious non-movie titles: " + ", ".join(bad))
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -29,7 +42,7 @@ def main() -> None:
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    print(f"Wrote {movie_count} movies to {output}")
+    print(f"Wrote {len(movies)} movies to {output}")
 
 
 if __name__ == "__main__":
