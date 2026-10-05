@@ -1,269 +1,237 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
-from urllib.parse import urljoin
+import unicodedata
+from datetime import datetime, timezone
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-from playwright.sync_api import sync_playwright
+import requests
 
 MADRID = ZoneInfo("Europe/Madrid")
+YELMO_BASE = "https://www.yelmocines.es"
+NOW_PLAYING_URL = f"{YELMO_BASE}/now-playing.aspx/GetNowPlaying"
+CITY_KEY = "malaga"
+CITY_NAME = "Málaga"
 
-CINEMAS = [
-    {
-        "name": "Vialia Málaga",
-        "url": "https://www.yelmocines.es/cartelera/malaga/vialia-malaga",
-    },
-    {
-        "name": "Plaza Mayor",
-        "url": "https://www.yelmocines.es/cartelera/malaga/plaza-mayor",
-    },
-    {
-        "name": "Rincón de la Victoria",
-        "url": "https://www.yelmocines.es/cartelera/malaga/rincon-de-la-victoria",
-    },
-]
-
-ENGLISH_MARKERS = (
-    "INGLÉS SUBTITULADO EN ESPAÑOL",
-    "INGLES SUBTITULADO EN ESPAÑOL",
-    "INGLÉS (VOSE)",
-    "INGLES (VOSE)",
-    "VOSE",
-)
-TIME_RE = re.compile(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b")
+TIME_RE = re.compile(r"^(?:[01]?\d|2[0-3]):[0-5]\d$")
+DOTNET_DATE_RE = re.compile(r"/Date\((-?\d+)")
+SPANISH_MONTHS = {
+    "enero": 1,
+    "febrero": 2,
+    "marzo": 3,
+    "abril": 4,
+    "mayo": 5,
+    "junio": 6,
+    "julio": 7,
+    "agosto": 8,
+    "septiembre": 9,
+    "octubre": 10,
+    "noviembre": 11,
+    "diciembre": 12,
+}
 
 GENERIC_TITLES = {
-    "CINES", "HORARIOS", "DÍA", "DIA", "TIPO PROYECCIÓN", "TIPO PROYECCION",
-    "FORMATO", "EXPERIENCIA", "IDIOMA", "PRÓXIMOS ESTRENOS", "PROXIMOS ESTRENOS",
-    "CATÁLOGO DE PELÍCULAS", "CATALOGO DE PELICULAS", "CAMBIAR DE PAÍS", "CAMBIAR DE PAIS",
-    "CINE YELMO", "POLÍTICAS", "POLITICAS", "AYUDA", "INFORMACIÓN DE CINE",
-    "INFORMACION DE CINE", "POLÍTICAS Y REGLAS DE ADMISIÓN", "POLITICAS Y REGLAS DE ADMISION",
+    "ayuda",
+    "cine yelmo",
+    "catalogo de peliculas",
+    "cambiar de pais",
 }
 
 
-def _clean(value: str | None) -> str:
-    return re.sub(r"\s+", " ", value or "").strip()
+def _clean(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
-def _absolute(base_url: str, href: str | None) -> str:
-    if not href or href.startswith("javascript:") or href == "#":
-        return base_url
-    return urljoin(base_url, href)
+def _plain(value: object) -> str:
+    text = unicodedata.normalize("NFD", _clean(value))
+    return "".join(ch for ch in text if unicodedata.category(ch) != "Mn").casefold()
 
 
-def _is_real_title(value: str) -> bool:
-    title = _clean(value)
-    upper = title.upper()
-    if not title or len(title) > 150:
+def _is_english_format(language: object) -> bool:
+    label = _plain(language)
+    # Yelmo currently marks its English-subtitled sessions as VOSE. Keep a
+    # couple of explicit English labels too, but do not accept generic VO: it
+    # can be an original language other than English.
+    return any(marker in label for marker in (
+        "vose",
+        "ingles subtitulado",
+        "english subtitled",
+        "english",
+    ))
+
+
+def _is_real_title(title: object) -> bool:
+    value = _clean(title)
+    if not value or len(value) > 180:
         return False
-    if upper in GENERIC_TITLES:
-        return False
-    if upper.endswith(" - MÁLAGA") or upper.endswith(" - MALAGA"):
-        return False
-    if any(marker in upper for marker in ENGLISH_MARKERS):
-        return False
-    return True
+    return _plain(value) not in GENERIC_TITLES
 
 
-def _find_day_select(page) -> int | None:
-    return page.evaluate(
-        """
-        () => {
-          const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
-          const selects = [...document.querySelectorAll('select')];
-          let best = null, bestScore = -1;
-          for (let i = 0; i < selects.length; i++) {
-            const select = selects[i];
-            const options = [...select.options].map(o => norm(o.textContent));
-            let score = options.length >= 2 ? 1 : 0;
-            let parent = select.parentElement, nearby = '';
-            for (let d = 0; d < 4 && parent; d++, parent = parent.parentElement) nearby += ' ' + norm(parent.innerText || parent.textContent);
-            if (/\bD[IÍ]A\b/i.test(nearby)) score += 5;
-            score += Math.min(options.filter(t => /HOY|MAÑANA|LUN|MAR|MI[EÉ]|JUE|VIE|S[AÁ]B|DOM|\d{1,2}[\/-]\d{1,2}|\d{4}-\d{2}-\d{2}/i.test(t)).length, 4);
-            if (score > bestScore) { bestScore = score; best = i; }
-          }
-          return bestScore >= 5 ? best : null;
-        }
-        """
-    )
+def _date_from_day(day: dict) -> str:
+    filter_date = _clean(day.get("FilterDate"))
+    match = DOTNET_DATE_RE.search(filter_date)
+    if match:
+        milliseconds = int(match.group(1))
+        local = datetime.fromtimestamp(milliseconds / 1000, tz=timezone.utc).astimezone(MADRID)
+        return local.date().isoformat()
+
+    # Fallback for the human label returned by Yelmo, e.g. "6 octubre".
+    label = _plain(day.get("ShowtimeDate"))
+    match = re.search(r"\b(\d{1,2})\s+([a-z]+)\b", label)
+    if match and match.group(2) in SPANISH_MONTHS:
+        day_number = int(match.group(1))
+        month = SPANISH_MONTHS[match.group(2)]
+        today = datetime.now(MADRID).date()
+        year = today.year
+        # Published schedules can cross New Year.
+        if month < today.month - 6:
+            year += 1
+        elif month > today.month + 6:
+            year -= 1
+        return f"{year:04d}-{month:02d}-{day_number:02d}"
+
+    raise ValueError(f"Could not parse Yelmo date: {day.get('ShowtimeDate')!r} / {day.get('FilterDate')!r}")
 
 
-def _day_options(page, select_index: int) -> list[dict]:
-    return page.evaluate(
-        """
-        (index) => {
-          const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
-          const select = document.querySelectorAll('select')[index];
-          if (!select) return [];
-          return [...select.options].map((o, i) => ({index:i, value:o.value, text:norm(o.textContent), disabled:o.disabled}))
-            .filter(o => !o.disabled && o.text && o.value !== '');
-        }
-        """,
-        select_index,
-    )
+def _cinema_url(cinema: dict) -> str:
+    key = _clean(cinema.get("Key"))
+    if re.fullmatch(r"[a-z0-9-]+", key):
+        return f"{YELMO_BASE}/cartelera/{CITY_KEY}/{key}"
+    return f"{YELMO_BASE}/cartelera/{CITY_KEY}/"
 
 
-def _normalize_date_label(value: str, text: str) -> str:
-    value, text = _clean(value), _clean(text)
-    for candidate in (value, text):
-        match = re.search(r"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b", candidate)
-        if match:
-            y, m, d = map(int, match.groups())
-            return f"{y:04d}-{m:02d}-{d:02d}"
-    today = datetime.now(MADRID).date()
-    if text.upper() == "HOY":
-        return today.isoformat()
-    if text.upper() in {"MAÑANA", "MANANA"}:
-        from datetime import timedelta
-        return (today + timedelta(days=1)).isoformat()
-    return text or value or today.isoformat()
+def _session_url(showtime: dict, cinema_url: str) -> str:
+    cinema_id = _clean(showtime.get("VistaCinemaId"))
+    showtime_id = _clean(showtime.get("ShowtimeId"))
+    if cinema_id and showtime_id:
+        return "https://compra.yelmocines.es/?" + urlencode({
+            "cinemaVistaId": cinema_id,
+            "showtimeVistaId": showtime_id,
+        })
+    return cinema_url
 
 
-def _extract_visible_movies(page, cinema: dict, date_label: str) -> list[dict]:
-    rows = page.evaluate(
-        """
-        ({ markers }) => {
-          const norm = s => (s || '').replace(/\s+/g, ' ').trim();
-          const upper = s => norm(s).toLocaleUpperCase('es-ES');
-          const isEnglish = s => markers.some(m => upper(s).includes(m));
-          const timeRe = /\b(?:[01]?\d|2[0-3]):[0-5]\d\b/;
-          const isBooking = a => /compra\.yelmocines\.es|showtimeVistaId|cinemaVistaId/i.test(a.getAttribute('href') || '');
-          const result = [];
-
-          for (const heading of [...document.querySelectorAll('h3')]) {
-            const title = norm(heading.innerText || heading.textContent);
-            if (!title) continue;
-            let card = heading, chosen = null;
-            for (let depth = 0; depth < 8 && card; depth++, card = card.parentElement) {
-              const h3s = [...card.querySelectorAll('h3')];
-              const bookings = [...card.querySelectorAll('a[href]')].filter(isBooking);
-              const text = norm(card.innerText || card.textContent);
-              if (h3s.length === 1 && bookings.length && text.length < 2200) { chosen = card; break; }
-            }
-            if (!chosen || !isEnglish(norm(chosen.innerText || chosen.textContent))) continue;
-
-            const headingLink = heading.closest('a[href]') || heading.querySelector('a[href]');
-            const showtimes = [];
-            const seen = new Set();
-            for (const markerEl of [...chosen.querySelectorAll('*')].filter(el => {
-              const t = norm(el.innerText || el.textContent);
-              return isEnglish(t) && ![...el.children].some(c => isEnglish(norm(c.innerText || c.textContent)));
-            })) {
-              let block = markerEl;
-              for (let depth = 0; depth < 6 && block && chosen.contains(block); depth++, block = block.parentElement) {
-                const anchors = [...block.querySelectorAll('a[href]')].filter(a => isBooking(a) && timeRe.test(norm(a.innerText || a.textContent)));
-                if (!anchors.length) continue;
-                for (const a of anchors) {
-                  const m = norm(a.innerText || a.textContent).match(timeRe);
-                  if (!m) continue;
-                  const key = `${m[0]}|${a.getAttribute('href') || ''}`;
-                  if (seen.has(key)) continue;
-                  seen.add(key);
-                  showtimes.push({time:m[0], href:a.getAttribute('href')});
-                }
-                break;
-              }
-            }
-            if (showtimes.length) result.push({title, filmHref: headingLink?.getAttribute('href') || null, showtimes});
-          }
-          return result;
-        }
-        """,
-        {"markers": [m.upper() for m in ENGLISH_MARKERS]},
-    )
-
-    movies = []
-    for row in rows:
-        title = _clean(row.get("title"))
-        if not _is_real_title(title):
-            continue
-        slots, seen = [], set()
-        for raw in row.get("showtimes", []):
-            time_text = _clean(raw.get("time"))
-            url = _absolute(cinema["url"], raw.get("href"))
-            if not TIME_RE.fullmatch(time_text):
-                continue
-            key = (time_text, url)
-            if key in seen:
-                continue
-            seen.add(key)
-            slots.append({"time": time_text, "url": url})
-        if slots:
-            slots.sort(key=lambda x: x["time"])
-            movies.append({"title": title, "url": _absolute(cinema["url"], row.get("filmHref")), "language": "VOSE", "dates": [{"date": date_label, "showtimes": slots}]})
-    return movies
-
-
-def _merge_movies(target: dict[str, dict], items: list[dict]) -> None:
-    for item in items:
-        key = item["title"].casefold()
-        if key not in target:
-            target[key] = item
-            continue
-        existing = target[key]
-        for day in item["dates"]:
-            current = next((d for d in existing["dates"] if d["date"] == day["date"]), None)
-            if current is None:
-                existing["dates"].append(day)
-                continue
-            seen = {(s["time"], s["url"]) for s in current["showtimes"]}
-            for slot in day["showtimes"]:
-                if (slot["time"], slot["url"]) not in seen:
-                    current["showtimes"].append(slot)
-            current["showtimes"].sort(key=lambda s: s["time"])
-
-
-def _scrape_cinema(page, cinema: dict) -> dict:
-    page.goto(cinema["url"], wait_until="domcontentloaded", timeout=30_000)
+def _session_datetime(date_value: str, time_value: str) -> str | None:
+    if not TIME_RE.fullmatch(time_value):
+        return None
     try:
-        page.wait_for_function("""() => [...document.querySelectorAll('a[href]')].some(a => /showtimeVistaId|compra\.yelmocines\.es/i.test(a.href))""", timeout=15_000)
-    except PlaywrightTimeoutError:
-        page.wait_for_timeout(3000)
+        value = datetime.fromisoformat(f"{date_value}T{time_value}:00").replace(tzinfo=MADRID)
+        return value.isoformat(timespec="minutes")
+    except ValueError:
+        return None
 
-    merged: dict[str, dict] = {}
-    select_index = _find_day_select(page)
-    if select_index is None:
-        _merge_movies(merged, _extract_visible_movies(page, cinema, datetime.now(MADRID).date().isoformat()))
-    else:
-        options = _day_options(page, select_index)
-        for option in options[:14] or [{"index": 0, "value": "", "text": "HOY"}]:
-            if options:
-                locator = page.locator("select").nth(select_index)
-                try:
-                    locator.select_option(value=option["value"])
-                except Exception:
-                    locator.select_option(index=option["index"])
-                page.wait_for_timeout(1100)
-            _merge_movies(merged, _extract_visible_movies(page, cinema, _normalize_date_label(option["value"], option["text"])))
 
-    movies = list(merged.values())
-    for movie in movies:
-        movie["dates"].sort(key=lambda d: d["date"])
-    movies.sort(key=lambda m: m["title"].casefold())
-    return {"name": cinema["name"], "url": cinema["url"], "movies": movies}
+def _fetch_city(city_key: str) -> dict:
+    headers = {
+        "accept": "application/json, text/javascript, */*; q=0.01",
+        "accept-language": "es-ES,es;q=0.9,en;q=0.8",
+        "content-type": "application/json; charset=UTF-8",
+        "x-requested-with": "XMLHttpRequest",
+        "referer": f"{YELMO_BASE}/cartelera/{city_key}/",
+        "origin": YELMO_BASE,
+        "user-agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/129.0 Safari/537.36"
+        ),
+    }
+    response = requests.post(
+        NOW_PLAYING_URL,
+        headers=headers,
+        json={"cityKey": city_key},
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    data = payload.get("d")
+    if not isinstance(data, dict):
+        raise RuntimeError("Yelmo GetNowPlaying returned an unexpected response")
+    return data
+
+
+def _parse_cinema(raw_cinema: dict) -> dict:
+    cinema_name = _clean(raw_cinema.get("Name")) or "Yelmo"
+    cinema_url = _cinema_url(raw_cinema)
+    movies: dict[str, dict] = {}
+
+    # Crucially, iterate EVERY date Yelmo publishes. There is no arbitrary
+    # today-only or 14-day limit here.
+    for raw_day in raw_cinema.get("Dates") or []:
+        date_value = _date_from_day(raw_day)
+
+        for raw_movie in raw_day.get("Movies") or []:
+            title = _clean(raw_movie.get("Title"))
+            if not _is_real_title(title):
+                continue
+
+            slots: list[dict] = []
+            for raw_format in raw_movie.get("Formats") or []:
+                language = _clean(raw_format.get("Language"))
+                if not _is_english_format(language):
+                    continue
+
+                for raw_showtime in raw_format.get("Showtimes") or []:
+                    time_value = _clean(raw_showtime.get("Time"))
+                    if not TIME_RE.fullmatch(time_value):
+                        continue
+                    slot = {
+                        "time": time_value,
+                        "datetime": _session_datetime(date_value, time_value),
+                        "url": _session_url(raw_showtime, cinema_url),
+                        "format": _clean(raw_format.get("Name") or raw_format.get("Format")),
+                    }
+                    slots.append(slot)
+
+            if not slots:
+                continue
+
+            movie_id = _clean(raw_movie.get("Key")) or title
+            key = movie_id.casefold()
+            movie = movies.setdefault(key, {
+                "id": movie_id,
+                "title": title,
+                "url": cinema_url,
+                "language": "VOSE",
+                "dates": {},
+            })
+            day_slots = movie["dates"].setdefault(date_value, [])
+            seen = {(s["time"], s["url"]) for s in day_slots}
+            for slot in slots:
+                marker = (slot["time"], slot["url"])
+                if marker not in seen:
+                    seen.add(marker)
+                    day_slots.append(slot)
+
+    output_movies = []
+    for movie in movies.values():
+        dates = []
+        for date_value, slots in sorted(movie.pop("dates").items()):
+            slots.sort(key=lambda item: (item["time"], item["url"]))
+            dates.append({"date": date_value, "showtimes": slots})
+        movie["dates"] = dates
+        output_movies.append(movie)
+
+    output_movies.sort(key=lambda item: item["title"].casefold())
+    return {
+        "id": _clean(raw_cinema.get("Key")) or _plain(cinema_name).replace(" ", "-"),
+        "name": cinema_name,
+        "url": cinema_url,
+        "movies": output_movies,
+    }
 
 
 def get_english_showtimes(force_refresh: bool = False) -> dict:
     del force_refresh
-    cinemas, errors = [], []
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
-        context = browser.new_context(locale="es-ES", timezone_id="Europe/Madrid", user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36")
-        for cinema in CINEMAS:
-            page = context.new_page()
-            try:
-                cinemas.append(_scrape_cinema(page, cinema))
-            except Exception as exc:
-                errors.append(f"{cinema['name']}: {exc}")
-                cinemas.append({"name": cinema["name"], "url": cinema["url"], "movies": []})
-            finally:
-                page.close()
-        context.close()
-        browser.close()
+    data = _fetch_city(CITY_KEY)
+    cinemas = [_parse_cinema(cinema) for cinema in data.get("Cinemas") or []]
 
-    payload = {"updated_at": datetime.now(MADRID).isoformat(timespec="seconds"), "cities": [{"id": "malaga", "name": "Málaga", "cinemas": cinemas}]}
-    if errors:
-        payload["warnings"] = errors
-    return payload
+    return {
+        "updated_at": datetime.now(MADRID).isoformat(timespec="seconds"),
+        "source_status": "ok",
+        "source": "Yelmo GetNowPlaying",
+        "cities": [{
+            "id": CITY_KEY,
+            "name": CITY_NAME,
+            "cinemas": cinemas,
+        }],
+    }
